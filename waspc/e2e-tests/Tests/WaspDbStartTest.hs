@@ -10,8 +10,10 @@ import ShellCommands
     inTestWaspProjectDir,
     setWaspDbToPSQL,
     skipIfDockerDisabled,
+    waitUntil,
     waspCliDbMigrateDev,
     waspCliDbStart,
+    (~&&),
   )
 import Test (Test (..), TestCase (..))
 import Wasp.Cli.Command.CreateNewProject.AvailableTemplates (minimalStarterTemplate)
@@ -92,6 +94,18 @@ waspDbStartTest =
         "reset-starts-and-removes-database"
         [ return "$WASP_CLI_CMD db reset --force --db-port 15434",
           assertDevDbRemoved
+        ],
+      postgresTestCase
+        "signals-stop-and-remove-database"
+        [ waspCliDbStartInBackground (Just 15436),
+          waitUntilDevDbReportsItIsReady,
+          holdDevDbSessionOpen,
+          stopWaspCliDbStartWithSignal "INT",
+          leaveStoppedDevDbContainerBehind,
+          waspCliDbStartInBackground (Just 15436),
+          waitUntilDevDbReportsItIsReady,
+          stopWaspCliDbStartWithSignal "TERM",
+          removeReportedDevDbVolume
         ]
     ]
   where
@@ -125,6 +139,57 @@ stopDevDbAndWait =
     "{ docker kill --signal INT \"$(docker ps -q --filter \"volume="
       ++ reportedDevDbVolumeName
       ++ "\")\" && { wait \"$(cat db-start.pid)\" || true; } && rm db-start.pid; }"
+
+-- | Stops `wasp db start` with the given signal (e.g. @INT@), and checks that
+-- Wasp exits and that the database container is gone.
+--
+-- We send the signal only to Wasp, and not to its whole process group like
+-- Ctrl+C in a terminal would, so that it's Wasp's job to stop the database.
+--
+-- `db-start.pid` might not be Wasp's own PID (e.g. when `$WASP_CLI_CMD` is a
+-- wrapper script), so we signal the parent of the `docker start --attach`
+-- client instead, which is Wasp.
+stopWaspCliDbStartWithSignal :: String -> ShellCommandBuilder WaspProjectContext ShellCommand
+stopWaspCliDbStartWithSignal signal =
+  return $
+    ("docker ps --format '{{.Names}}' --filter volume=" ++ reportedDevDbVolumeName ++ " > " ++ devDbContainerNameFile)
+      ~&& ("kill -" ++ signal ++ " $(ps -o ppid= -p \"$(pgrep -f \"docker start --attach $(docker inspect --format '{{.Id}}' \"$(cat " ++ devDbContainerNameFile ++ ")\")\")\")")
+      ~&& waitUntil
+        60
+        "! kill -0 \"$(cat db-start.pid)\" 2>/dev/null"
+        ("Wasp didn't stop after SIG" ++ signal ++ ".")
+      ~&& waitUntil
+        30
+        ("[ -z \"$(docker ps -a -q --filter volume=" ++ reportedDevDbVolumeName ++ ")\" ]")
+        ("The dev database container was left behind after SIG" ++ signal ++ ".")
+
+-- | Opens a database session that stays open, like the app's server's.
+holdDevDbSessionOpen :: ShellCommandBuilder WaspProjectContext ShellCommand
+holdDevDbSessionOpen =
+  return $
+    ("docker exec -d " ++ devDbContainerId ++ " " ++ psqlInDevDbContainer "select pg_sleep(600)")
+      ~&& waitUntil
+        30
+        ( "[ \"$(docker exec "
+            ++ devDbContainerId
+            ++ " "
+            ++ psqlInDevDbContainer "select count(*) from pg_stat_activity where pid <> pg_backend_pid() and datname = current_database()"
+            ++ ")\" != 0 ]"
+        )
+        "The database session didn't open."
+  where
+    devDbContainerId = "\"$(docker ps -q --filter volume=" ++ reportedDevDbVolumeName ++ ")\""
+    psqlInDevDbContainer sql = "sh -c 'psql -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -tAc \"" ++ sql ++ "\"'"
+
+-- | Creates a stopped container with the name of the dev db container that
+-- 'stopWaspCliDbStartWithSignal' stopped, like the one Wasp leaves behind when
+-- it's stopped after creating the container but before starting it.
+leaveStoppedDevDbContainerBehind :: ShellCommandBuilder WaspProjectContext ShellCommand
+leaveStoppedDevDbContainerBehind =
+  return $ "docker create --name \"$(cat " ++ devDbContainerNameFile ++ ")\" alpine > /dev/null"
+
+devDbContainerNameFile :: FilePath
+devDbContainerNameFile = "db-container-name.txt"
 
 -- Wasp prints the volume name after its database readiness check succeeds.
 waitUntilDevDbReportsItIsReady :: ShellCommandBuilder WaspProjectContext ShellCommand

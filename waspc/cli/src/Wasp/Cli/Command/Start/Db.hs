@@ -36,6 +36,7 @@ import Wasp.Cli.Port (resolvePort)
 import Wasp.Cli.Util.Parser (ArgsParser (..), withArguments)
 import Wasp.Cli.Util.PortArgument (portParser)
 import Wasp.Db.Postgres (defaultPostgresDockerImageSpec, defaultPostgresPort)
+import qualified Wasp.Job as Job
 import qualified Wasp.Message as Msg
 import Wasp.Project.Common (WaspProjectDir)
 import Wasp.Project.Db (databaseUrlEnvVarName)
@@ -178,7 +179,7 @@ withPostgresSession waspProjectDir appName options policy action = do
         (withDatabaseError "Could not start PostgreSQL" $ Dev.Postgres.createDevPostgresContainer db image mountPath)
         Docker.removeContainer
         ( \containerId -> do
-            databaseJob <- liftIO $ async $ Docker.runDockerJobAndPrintOutput ["start", "--attach", containerId]
+            databaseJob <- liftIO $ async $ Job.run $ Job.prefixWith Job.Db $ Dev.Postgres.runDevPostgresContainer containerId
             return $ StartedDatabase db containerId databaseJob
         )
 

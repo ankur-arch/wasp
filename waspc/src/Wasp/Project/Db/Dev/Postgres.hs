@@ -2,6 +2,7 @@
 module Wasp.Project.Db.Dev.Postgres
   ( makeDevPostgresDbSpec,
     createDevPostgresContainer,
+    runDevPostgresContainer,
     waitForDevDbReady,
     DevDbSpec (..),
     getDevConnectionUrl,
@@ -17,6 +18,8 @@ import System.Exit (ExitCode (..))
 import System.Process (CreateProcess (create_group), proc, readCreateProcessWithExitCode, readProcessWithExitCode)
 import Text.Printf (printf)
 import Wasp.Db.Postgres (defaultPostgresPort, makeConnectionUrl, postgresMaxDbNameLength)
+import Wasp.Job (Job)
+import qualified Wasp.Job as Job
 import Wasp.Project.Common (WaspProjectDir, makeAppUniqueId)
 import Wasp.Util.Docker (DockerImageName, DockerVolumeMountPath, discoverHostPortForDockerContainersInternalPort)
 import qualified Wasp.Util.IO.Retry as Retry
@@ -47,6 +50,11 @@ getDevConnectionUrl devDbSpec =
 
 createDevPostgresContainer :: DevDbSpec -> DockerImageName -> DockerVolumeMountPath -> IO String
 createDevPostgresContainer db image mountPath = do
+  -- A container that was created but never started (e.g. when Wasp was stopped
+  -- right after creating it) keeps its name, so `--rm` never removes it, and
+  -- creating a new one would fail. `docker rm` without `--force` doesn't remove
+  -- running containers, so this never stops a database that is in use.
+  _ <- readProcessWithExitCode "docker" ["rm", db.dockerContainerName] ""
   -- create_group keeps Docker outside the terminal's Ctrl+C group so it can return the container ID needed for cleanup.
   (status, output, errors) <- readCreateProcessWithExitCode ((proc "docker" args) {create_group = True}) ""
   case (status, words output) of
@@ -67,6 +75,10 @@ createDevPostgresContainer db image mountPath = do
           ["--env", printf "POSTGRES_DB=%s" db.dbName],
           [image]
         ]
+
+-- | Runs the created dev database container in the foreground, until it stops.
+runDevPostgresContainer :: String -> Job ExitCode
+runDevPostgresContainer containerId = Job.fromProc $ Job.proc "docker" ["start", "--attach", containerId]
 
 waitForDevDbReady :: DevDbSpec -> IO ()
 waitForDevDbReady devDbSpec = do

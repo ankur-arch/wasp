@@ -31,6 +31,7 @@ import Wasp.Cli.RunConfigs (makeRunConfigs, showRunConfigUrls)
 import Wasp.Cli.Util.Parser (withArguments)
 import qualified Wasp.Generator
 import Wasp.Generator.ServerGenerator.RunConfig (ServerRunConfig (..))
+import qualified Wasp.Generator.ServerGenerator.Start as ServerGenerator.Start
 import Wasp.Generator.WebAppGenerator.RunConfig (WebAppRunConfig)
 import qualified Wasp.Message as Msg
 import Wasp.Project (CompileError, CompileWarning)
@@ -81,13 +82,9 @@ start = withArguments startArgsParser $ \args ->
       -- This way we can show newest Wasp compile warnings and errors (produced by recompilation from
       -- 'watch') once jobs from 'start' quiet down a bit.
       ongoingCompilationResultMVar <- newMVar (warnings, [])
-      let watchWaspProjectSource = watch waspProjectDir outDir projectLock ongoingCompilationResultMVar
-      let startGeneratedWebApp =
-            Wasp.Generator.start
-              runConfigs
-              waspProjectDir
-              outDir
-              (onJobsQuietDown ongoingCompilationResultMVar)
+      serverInbox <- ServerGenerator.Start.newServerInbox
+      let watchWaspProjectSource = watch waspProjectDir outDir projectLock ongoingCompilationResultMVar $ ServerGenerator.Start.notifyServer serverInbox
+      let startGeneratedWebApp = Wasp.Generator.start runConfigs waspProjectDir outDir serverInbox (onJobsQuietDown ongoingCompilationResultMVar)
       -- In parallel:
       -- 1. watch for any changes in the Wasp project, be it users wasp code or users JS/HTML/...
       --    code. On any change, Wasp is recompiled (and generated app is re-generated).
